@@ -6,19 +6,7 @@ pub mod frame_pool;
 pub mod peer;
 pub mod sub;
 pub mod wirehelp;
-
-#[cfg(feature = "std")]
-mod time {
-    pub use std::time::{Duration, Instant};
-}
-
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-mod time {
-    pub use embassy_time::{Duration, Instant};
-}
-
-use time::Instant;
+use embassy_time::Instant;
 
 pub enum Error<E> {
     Serial(E),
