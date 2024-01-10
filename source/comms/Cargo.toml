@@ -1,0 +1,49 @@
+[package]
+name = "comms"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+embassy-sync = "0.5.0"
+grounded = "0.2"
+embassy-time = { version = "0.2", features = ["defmt", "defmt-timestamp-uptime"] }
+rand_core = "0.6.4"
+futures = { version = "0.3.29", default-features = false, features = ["async-await"] }
+heapless = "0.7.0"
+static_cell = { version = "2", features = ["nightly"]}
+
+[dependencies.serde]
+version = "1.0"
+default-features = false
+features = ["derive"]
+
+[dependencies.postcard]
+version = "1.0"
+features = ["experimental-derive", "heapless"]
+
+[dependencies.postcard-rpc]
+version = "0.3"
+
+[dependencies.defmt]
+version = "0.3"
+
+[features]
+default = []
+std = []
+
+[dev-dependencies.tokio]
+version = "1.34"
+features = ["rt", "macros", "time"]
+
+[dev-dependencies.embassy-sync]
+version = "0.4.0"
+features = ["std"]
+
+[dev-dependencies.critical-section]
+version = "1.1"
+features = ["std"]
+
+[patch.crates-io]
+embassy-time = { git = "https://github.com/jamesmunns/embassy", rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d" }
