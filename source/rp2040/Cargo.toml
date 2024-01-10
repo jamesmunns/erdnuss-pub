@@ -1,0 +1,43 @@
+[package]
+name            = "erdnuss-rp2040"
+version         = "0.9.9"
+authors         = ["James Munns <james@onevariable.com>"]
+edition         = "2021"
+readme          = "README.md"
+repository      = "https://github.com/jamesmunns/erdnuss-pub"
+description     = "A small RS-485 comms protocol impl for the RP2040"
+license         = "MPL-2.0"
+documentation   = "https://docs.rs/erdnuss-rp2040/"
+
+[dependencies]
+embassy-futures     = "0.1.0"
+
+[dependencies.erdnuss-comms]
+version             = "0.9"
+path                = "../comms"
+
+[dependencies.embassy-rp]
+version             = "0.1.0"
+features            = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"]
+
+[dependencies.embassy-time]
+version             = "0.2"
+features            = ["defmt", "defmt-timestamp-uptime"]
+
+[dependencies.rand_chacha]
+version             = "0.3.1"
+default-features    = false
+
+
+[patch.crates-io.embassy-rp]
+git = "https://github.com/jamesmunns/embassy"
+rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d"
+
+[patch.crates-io.embassy-time]
+git = "https://github.com/jamesmunns/embassy"
+rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d"
+
+[patch.crates-io.embassy-futures]
+git = "https://github.com/jamesmunns/embassy"
+rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d"
+
