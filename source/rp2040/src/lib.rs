@@ -48,6 +48,8 @@ impl<T: Instance + 'static> Rs485Uart<T> {
 
     /// This function exists so we can do stuff and early return, and still
     /// reset stuff in the outer context.
+    //
+    // TODO: This function is not cancellation safe wrt the DE pin and RXE! Fix this!
     async fn send_frame_inner(&mut self, data: &[u8]) -> Result<(), erdnuss_comms::Error<()>> {
         // For very short sends, we really don't want to yield, as it will be done
         // almost immediately, and it just adds variability to our timing.

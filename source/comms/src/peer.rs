@@ -76,6 +76,14 @@ impl Peer {
                 self.reset_to_free();
             }
             State::Active => {
+                // TODO: We should probably drop all incoming/outgoing messages
+                // in the deques. We may ALSO want to hold this address as "unusable"
+                // for some amount of time, to ensure we don't re-use the address before
+                // the Sub "notices" it has been dropped, to avoid a flaky device from
+                // incorrectly "sharing" the logical address with a new device.
+                //
+                // We might want a separate "timeout/inhibit" state that is used when
+                // moving from Active -> Free with a timestamp.
                 self.counter += 1;
                 if self.counter > 3 {
                     defmt::println!("Resetting active device");
