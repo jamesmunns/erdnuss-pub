@@ -9,20 +9,23 @@
 //! At the moment, only 32 devices on a single bus are supported. This also
 //! happens to be the upper limit supported by low cost hardware transcievers.
 //!
-//! At the moment, all communications on the bus are either Dom-to-one-sub, or
-//! one-sub-to-dom. There is no provision yet for sub-to-sub messaging.
+//! At the moment, all communications on the bus are either Controller-to-one-Target, or
+//! one-target-to-controller. There is no provision yet for Target-to-Target messaging.
 //!
 //! ## Entities
 //!
 //! There are two roles in this netstack:
 //!
-//! 1. The Dom, or dominant role, which is responsible for commanding and
+//! 1. The Controller (or CON) role, which is responsible for commanding and
 //!    managing the time slices given to all other devices on the bus
-//! 2. The Sub, or submissive role, which only responds to commands from
-//!    the Dom.
+//! 2. The Target (or TGT) role, which only responds to commands from
+//!    the Controller.
+//!
+//! This nomenclature matches those used by I3C and other similar bus protocols
+//! with a single device "in charge" of driving communications.
 //!
 //! At the moment, these roles are expected to be permanently assigned at
-//! compile time. There must always be exactly one Dom on any bus.
+//! compile time. There must always be exactly one Controller on any bus.
 //!
 //! ## Message Framing
 //!
@@ -54,24 +57,24 @@
 //! As RS-485 is a half-duplex, shared medium, bus; it is necessary to coordinate
 //! betwee all senders to avoid message collisions.
 //!
-//! This is achieved by having the Dom be "in charge" of a bus. The communication
-//! between the Dom and Sub is polling-based, and generally looks like this:
+//! This is achieved by having the Controller be "in charge" of a bus. The communication
+//! between the Controller and Target is polling-based, and generally looks like this:
 //!
-//! 1. The line is idle, and the Dom decides to send to a specific Sub
-//! 2. The Dom sends a command-address byte with the ID of the dom
-//! 3. If the Dom has a pending message to that Sub, it then sends that payload
+//! 1. The line is idle, and the Controller decides to send to a specific Target
+//! 2. The Controller sends a command-address byte with the ID of the controller
+//! 3. If the Controller has a pending message to that Target, it then sends that payload
 //!    (zero or one data frames)
-//! 4. Once the Dom is done sending, it signals "end of frame" with a line break, and
+//! 4. Once the Controller is done sending, it signals "end of frame" with a line break, and
 //!    begins listening for 1ms, or until a line break occurs, whichever comes first.
-//! 5. The addressed Sub notices it has been addressed, and all other non-addressed
-//!    subs go back to listening.
-//! 6. The addressed Sub sends a response-address byte with its own ID
-//! 7. If the Sub has a pending message for the Dom, it then sends that payload
+//! 5. The addressed Target notices it has been addressed, and all other non-addressed
+//!    Targets go back to listening.
+//! 6. The addressed Target sends a response-address byte with its own ID
+//! 7. If the Target has a pending message for the CON, it then sends that payload
 //!    (zero or one data frames)
-//! 8. One the Sub is done sending, it signals "end of frame" with a line break, and
+//! 8. One the Target is done sending, it signals "end of frame" with a line break, and
 //!    begins listening again
-//! 9. The Dom hears the line break, processes the received message if any, and goes
-//!    back to step 1 for the next Sub
+//! 9. The Controller hears the line break, processes the received message if any, and goes
+//!    back to step 1 for the next Target
 //!
 //! ## Automatic logical addressing
 //!
@@ -82,49 +85,49 @@
 //! In order to reduce overhead on the bus for addressing, devices are dynamically assigned
 //! a 5-bit address (0..32).
 //!
-//! When a sub first boots, it does not have a logical address. The Dom will periodically
-//! offer unused addresses, and any subs without an address will random decide whether to
+//! When a Target first boots, it does not have a logical address. The Controller will periodically
+//! offer unused addresses, and any Targets without an address will random decide whether to
 //! claim the address.
 //!
-//! As there may be multiple subs that attempt to claim the address at the same time, the act
+//! As there may be multiple Targets that attempt to claim the address at the same time, the act
 //! of being assigned an address takes multiple steps:
 //!
-//! 1. The Dom offers an address, and includes 8 bytes of random data
-//! 2. A sub with no address randomly decides whether to attempt to claim the address.
+//! 1. The Controller offers an address, and includes 8 bytes of random data
+//! 2. A Target with no address randomly decides whether to attempt to claim the address.
 //!    This random chance is aimed at reducing collisions where two or more nodes attempt
 //!    to claim the same address.
-//! 3. If a sub decides to go ahead, it takes the 8 random bytes, and XORs them with its own
+//! 3. If a Target decides to go ahead, it takes the 8 random bytes, and XORs them with its own
 //!    8-byte unique hardware ID, and sends a "claim" message back
-//! 4. If the Dom hears this claim, it takes the received 8 bytes, and XORs them with the
+//! 4. If the Controller hears this claim, it takes the received 8 bytes, and XORs them with the
 //!    original 8 random bytes. If there was not a collision, it should be left with the MAC
-//!    address of the new Sub. The Dom marks this address and unique ID as "pending"
-//! 5. At a later time, the Dom sends a message to the logical address, containing the MAC address
+//!    address of the new Target. The Controller marks this address and unique ID as "pending"
+//! 5. At a later time, the Controller sends a message to the logical address, containing the MAC address
 //!    it thinks it heard in step 4, and waits for an acknowledgement.
-//! 6. If the sub hears the logical address it claimed, AND the unique ID matches its own unique ID,
+//! 6. If the Target hears the logical address it claimed, AND the unique ID matches its own unique ID,
 //!    then it sends an acknowledgement, and considers itself as having "joined" the bus, exclusively
 //!    owning that logical address
-//! 7. If the dom hears the ACK, it marks that address as fully assigned. If it does not hear an
+//! 7. If the controller hears the ACK, it marks that address as fully assigned. If it does not hear an
 //!    ACK, it marks the address from "pending" to "free".
 //!
 //! At the moment, the random chance in step 2 is a 1/8 chance, though this may change in the future.
 //!
-//! ## Dom "steps"
+//! ## Controller "steps"
 //!
-//! So far, we've described the process of a single dom/sub communication. This must be carried
-//! out for all subs on the bus. In general, the dom performs an endless polling loop, consisting
+//! So far, we've described the process of a single CON/TGT communication. This must be carried
+//! out for all TGTs on the bus. In general, the CON performs an endless polling loop, consisting
 //! of three phases:
 //!
-//! 1. For each known sub with an assigned logical address:
-//!     * Address the sub, additionally sending it 0 or 1 data frames
-//!     * Wait for the sub to respond.
+//! 1. For each known TGT with an assigned logical address:
+//!     * Address the TGT, additionally sending it 0 or 1 data frames
+//!     * Wait for the TGT to respond.
 //!         * If it DOES respond, it will respond with 0 or 1 data frames, and clear the "failure counter".
 //!         * If it DOES NOT respond, we increment a "failure counter".
 //! 2. For each address in the "pending" phase:
 //!     * We send the confirmation message (step 5 above)
-//!     * Wait for the sub to respond or a timeout to occur (step 7 above)
+//!     * Wait for the TGT to respond or a timeout to occur (step 7 above)
 //! 3. If we have any remaining un-assigned logical addresses:
 //!     * Send an "offer message" (step 1 above)
-//!     * Wait for the sub to respond or a timeout to occur (step 4 above)
+//!     * Wait for the TGT to respond or a timeout to occur (step 4 above)
 //!
 //! At the moment, it is up to the application to decide how often to perform a "step". This could be
 //! continuously, every N milliseconds, or on some other metric.
@@ -132,7 +135,7 @@
 //! More steps/sec means:
 //!
 //! * More CPU time spent checking and responding to messages
-//! * Less latency for messages waiting to be transferred from dom to sub or sub to dom
+//! * Less latency for messages waiting to be transferred from CON to TGT or TGT to CON
 //! * Higher data throughput on the bus
 //!
 //! Fewer steps/sec will mean the inverse. In the future, there might be a better way to
@@ -140,19 +143,19 @@
 //!
 //! ## Culling of inactive devices
 //!
-//! As all subs are expected to quickly respond to all queries from the Dom, the Dom uses
+//! As all Targets are expected to quickly respond to all queries from the Controller, the Controller uses
 //! a "three strikes you're out" rule to avoid wasting bus time on timeouts from
-//! unresponsive subs. If a sub fails to respond three times in a row, it is dropped, and
+//! unresponsive Targets. If a Target fails to respond three times in a row, it is dropped, and
 //! the address is marked as free.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![allow(async_fn_in_trait)]
 #![warn(missing_docs)]
 
-pub mod dom;
+pub mod controller;
 pub mod frame_pool;
 pub mod peer;
-pub mod sub;
+pub mod target;
 pub mod wirehelp;
 use embassy_time::Instant;
 
@@ -209,7 +212,7 @@ pub trait FrameSerial {
 // ```
 // 0b000_xxxxx -> reserved (extended addr/cmd?)
 //     -> Then `000_AAAAA_BBBBBBBB` where AAAAA is cmd and BBBBBBBB is addr?
-// 0b001_NNNNN -> Select address NNNNN (dom tx, then sub rx)
+// 0b001_NNNNN -> Select address NNNNN (con tx, then tgt rx)
 // 0b010_NNNNN -> Reply from address NNNNN
 // 0b011_xxxxx -> reserved (broadcast?)
 //     -> NoSend Keepalive?

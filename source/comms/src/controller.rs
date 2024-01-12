@@ -22,11 +22,11 @@ pub enum RecvError {
     NoMessage,
 }
 
-pub struct Dom<R: RawMutex + 'static> {
+pub struct Controller<R: RawMutex + 'static> {
     peers: Mutex<R, [Peer; NUM_PEERS]>,
 }
 
-impl<R: RawMutex + 'static> Dom<R> {
+impl<R: RawMutex + 'static> Controller<R> {
     pub const fn uninit() -> Self {
         const ONE: Peer = Peer::const_new();
         Self {
