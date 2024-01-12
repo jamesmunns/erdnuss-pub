@@ -159,6 +159,10 @@ pub mod target;
 pub mod wirehelp;
 use embassy_time::Instant;
 
+pub const MAX_TARGETS: usize = 31;
+
+pub use crate::controller::Controller;
+
 /// An error type for the [`FrameSerial`] trait
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
@@ -209,30 +213,57 @@ pub trait FrameSerial {
     ) -> Result<TimedFrame<'a>, Error<Self::SerError>>;
 }
 
-// ```
-// 0b000_xxxxx -> reserved (extended addr/cmd?)
-//     -> Then `000_AAAAA_BBBBBBBB` where AAAAA is cmd and BBBBBBBB is addr?
-// 0b001_NNNNN -> Select address NNNNN (con tx, then tgt rx)
-// 0b010_NNNNN -> Reply from address NNNNN
-// 0b011_xxxxx -> reserved (broadcast?)
-//     -> NoSend Keepalive?
-// 0b100_NNNNN -> Discover Offer: NNNNN
-// 0b101_NNNNN -> Discovery Claim for NNNNN
-// 0b110_xxxxx -> reserved
-// 0b111_NNNNN -> Discovery Success for NNNNN
-// ```
+/// Command + Address byte
+///
+/// [CmdAddr] is a combined Command and Address byte. It consists of:
+///
+/// * 3 command-bits (`0..=7`)
+/// * 5 address-bits (`0..=31`)
+///
+/// The command bits are most significant, and the address bits are least
+/// significant, e.g. `0bCCC_AAAAA`, where C are command bits and A are
+/// address bits.
+///
+/// The address bits are the logical address of the target, which may be
+/// a source or destination, depending on the message kind.
+///
+/// Commands 1, 2, 4, 5, and 7 are assigned as described below. Commands
+/// 0, 3, and 6 are reserved for future use, and currently considered
+/// invalid.
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub enum CmdAddr {
+    /// Select - `0b001`
+    ///
+    /// Used when the Controller is addressing a Target.
     SelectAddr(u8),
+    /// Reply - `0b010`
+    ///
+    /// Used when the Target is responding to the Controller.
     ReplyFromAddr(u8),
+    /// Discovery Offer - `0b100`
+    ///
+    /// Used when the Controller is offering an unused logical address
+    /// to Targets without one. The offered address is the one in the
+    /// 5-bit address field.
     DiscoveryOffer(u8),
+    /// Discovery Claim - `0b0101`
+    ///
+    /// Used when a Target attempts to claim a Discovery Offer message.
     DiscoveryClaim(u8),
+    /// Discovery Success - `0b111`
+    ///
+    /// used when the Controller is informing a Target that its address
+    /// claim is (tentatively) successful. The Target must respond to
+    /// this message with an empty Reply.
     DiscoverySuccess(u8),
 }
 
+/// Command Address Error
+#[derive(Debug, PartialEq)]
 #[non_exhaustive]
 pub enum CmdAddrError {
+    /// A reserved bit pattern was found
     Reserved,
 }
 

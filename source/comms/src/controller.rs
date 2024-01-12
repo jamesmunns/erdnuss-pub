@@ -1,3 +1,7 @@
+//! Controller Interface
+//!
+//! The Controller is responsible for running the bus.
+
 use core::ops::DerefMut;
 
 use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
@@ -7,35 +11,62 @@ use rand_core::RngCore;
 use crate::{
     frame_pool::{FrameBox, RawFrameSlice},
     peer::{Peer, INCOMING_SIZE},
-    CmdAddr, FrameSerial,
+    wirehelp::{WireFrameBox, SendFrameBox},
+    CmdAddr, FrameSerial, MAX_TARGETS,
 };
 
-const NUM_PEERS: usize = 32;
-
-pub enum SendError {
-    NoMatchingMac,
-    QueueFull,
-}
-
-pub enum RecvError {
-    NoMatchingMac,
-    NoMessage,
-}
-
+/// Controller interface and data storage
+///
+/// The static Controller is intended to be used in two separate places
+/// in an application:
+///
+/// 1. In one place, where [Controller::step()] is called periodically, to
+///    service bus operations
+/// 2. In another place, where [Controller::recv_from()] or [Controller::send()]
+///    are called, to process or forward messages to/from the bus
+///
+/// In a typical example where the Controller is acting as a Bridge/Router over
+/// USB, place 1. would be a standalone task, calling step at some periodic polling
+/// rate, and place 2. would be grouped with the USB interface for sending/receiving
+/// frames over USB.
+///
+/// The Controller contains an async Mutex which provides interior mutable access to
+/// information such as the table of connected Targets, or any "in flight" messages.
 pub struct Controller<R: RawMutex + 'static> {
-    peers: Mutex<R, [Peer; NUM_PEERS]>,
+    peers: Mutex<R, [Peer; MAX_TARGETS]>,
 }
 
+/// Instantiation and Initialization methods
 impl<R: RawMutex + 'static> Controller<R> {
+    /// Create a new, uninitialized controller structure
+    ///
+    /// Intended to be used to create as a static to avoid large
+    /// stack initializations.
+    ///
+    /// Users must still call [`Controller::init()`] before use.
+    ///
+    /// ```rust
+    /// use erdnuss_comms::controller::Controller;
+    /// use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    ///
+    /// // NOTE: you can use any mutex suitable for you, such as `ThreadModeRawMutex`
+    /// // if you not using this from an interrupt context
+    /// static CONTROLLER: Controller<CriticalSectionRawMutex> = Controller::uninit();
+    /// ```
     pub const fn uninit() -> Self {
         const ONE: Peer = Peer::const_new();
         Self {
-            peers: Mutex::new([ONE; NUM_PEERS]),
+            peers: Mutex::new([ONE; MAX_TARGETS]),
         }
     }
 
+    /// Initialize the [Controller]
+    ///
+    /// This initialization provides the backing storage for the incoming target
+    /// frames. [RawFrameSlice] must contain AT LEAST [INCOMING_SIZE] times [MAX_TARGETS]
+    /// frame storage slots. `sli`'s capacity will be reduced by this amount.
     pub async fn init(&self, sli: &mut RawFrameSlice) {
-        assert!(sli.capacity() >= (INCOMING_SIZE * NUM_PEERS));
+        assert!(sli.capacity() >= (INCOMING_SIZE * MAX_TARGETS));
         let mut inner = self.peers.lock().await;
         for m in inner.iter_mut() {
             let mut split = sli.split(INCOMING_SIZE).unwrap();
@@ -44,39 +75,75 @@ impl<R: RawMutex + 'static> Controller<R> {
             m.set_pool(split);
         }
     }
+}
 
-    // TODO: These shouldn't have FrameBox, they should have some other
-    // type that hides the headers and stuff
-    pub async fn send(&self, mac: u64, frame: FrameBox) -> Result<(), SendError> {
-        let mut inner = self.peers.lock().await;
-        for p in inner.iter_mut() {
-            if p.is_active_mac(mac) {
-                return p.enqueue_outgoing(frame).map_err(|_| SendError::QueueFull);
-            }
-        }
-        Err(SendError::NoMatchingMac)
-    }
-
-    // TODO: These shouldn't have FrameBox, they should have some other
-    // type that hides the headers and stuff
-    pub async fn recv_from(&self, mac: u64) -> Result<FrameBox, RecvError> {
-        let mut inner = self.peers.lock().await;
-        for p in inner.iter_mut() {
-            if p.is_active_mac(mac) {
-                return p.dequeue_incoming().ok_or(RecvError::NoMessage);
-            }
-        }
-        Err(RecvError::NoMatchingMac)
-    }
-
-    pub async fn step<T: FrameSerial, Rand: RngCore>(&self, serial: &mut T, rand: &mut Rand) {
+/// Bus management and operation method(s)
+impl<R: RawMutex + 'static> Controller<R> {
+    /// Perform one "step" of the bus
+    ///
+    /// One call to `step` will:
+    ///
+    /// 1. Send UP TO one message to any known Targets, and Receive
+    ///    UP TO one message from any known Target
+    /// 2. Attempt to complete any pending logical address offers
+    /// 3. Attempt to offer UP TO one unused logical address
+    ///
+    /// This method should be called regularly.
+    ///
+    /// The `serial` and `rand` resources are passed in on every call to `step`,
+    /// rather than making them part of the entire `Controller` entity for a couple
+    /// of stylistic reasons:
+    ///
+    /// * Keep the static type-generics less complex
+    /// * Make initialization less complex
+    /// * Make these generics NOT required for the shared `send`/`recv_from`
+    ///   interface methods
+    ///
+    /// The inner async mutex will be locked for the entire duration of the call to
+    /// `step`, which may be held for some amount of time, depending on the number of
+    /// bus timeouts and total amount of data transferred. This may be on the order of
+    /// millisecond(s).
+    pub async fn step<T, Rand>(&self, serial: &mut T, rand: &mut Rand)
+    where
+        T: FrameSerial,
+        Rand: RngCore
+    {
         let mut inner = self.peers.lock().await;
         serve_peers(inner.deref_mut(), serial).await;
         complete_pendings(inner.deref_mut(), serial).await;
         offer_addr(inner.deref_mut(), serial, rand).await;
     }
+}
 
-    pub async fn connected(&self) -> heapless::Vec<u64, NUM_PEERS> {
+/// Bus I/O methods
+impl<R: RawMutex + 'static> Controller<R> {
+    // TODO: These shouldn't have FrameBox, they should have some other
+    // type that hides the headers and stuff
+    pub async fn send(&self, mac: u64, frame: SendFrameBox) -> Result<(), SendError> {
+        let mut inner = self.peers.lock().await;
+        for p in inner.iter_mut() {
+            if p.is_active_mac(mac) {
+                return p.enqueue_outgoing(frame.into_inner()).map_err(|_| SendError::QueueFull);
+            }
+        }
+        Err(SendError::NoMatchingMac)
+    }
+
+    /// Attempt to receive a message from the given unique address
+    pub async fn recv_from(&self, mac: u64) -> Result<WireFrameBox, RecvError> {
+        self.peers
+            .lock()
+            .await
+            .iter_mut()
+            .find(|p| p.is_active_mac(mac))
+            .ok_or(RecvError::NoMatchingMac)
+            .and_then(|p| p.dequeue_incoming().ok_or(RecvError::NoMessage))
+            .map(WireFrameBox::new_unchecked)
+    }
+
+
+
+    pub async fn connected(&self) -> heapless::Vec<u64, MAX_TARGETS> {
         let mut out = heapless::Vec::new();
         let inner = self.peers.lock().await;
         for p in inner.iter() {
@@ -88,7 +155,17 @@ impl<R: RawMutex + 'static> Controller<R> {
     }
 }
 
-async fn serve_peers<T: FrameSerial>(inner: &mut [Peer; NUM_PEERS], serial: &mut T) {
+pub enum SendError {
+    NoMatchingMac,
+    QueueFull,
+}
+
+pub enum RecvError {
+    NoMatchingMac,
+    NoMessage,
+}
+
+async fn serve_peers<T: FrameSerial>(inner: &mut [Peer; MAX_TARGETS], serial: &mut T) {
     // First pass: poll all active devices
     for (i, p) in inner.iter_mut().enumerate() {
         if !p.is_active() {
@@ -135,7 +212,7 @@ async fn serve_peers<T: FrameSerial>(inner: &mut [Peer; NUM_PEERS], serial: &mut
     }
 }
 
-async fn complete_pendings<T: FrameSerial>(inner: &mut [Peer; NUM_PEERS], serial: &mut T) {
+async fn complete_pendings<T: FrameSerial>(inner: &mut [Peer; MAX_TARGETS], serial: &mut T) {
     for (i, p) in inner.iter_mut().enumerate() {
         let Some(mac) = p.is_pending() else {
             continue;
@@ -167,7 +244,7 @@ async fn complete_pendings<T: FrameSerial>(inner: &mut [Peer; NUM_PEERS], serial
 }
 
 async fn offer_addr<T: FrameSerial, R: RngCore>(
-    inner: &mut [Peer; NUM_PEERS],
+    inner: &mut [Peer; MAX_TARGETS],
     serial: &mut T,
     rand: &mut R,
 ) {
