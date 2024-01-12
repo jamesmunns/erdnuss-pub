@@ -11,7 +11,7 @@ enum State {
     Active,
 }
 
-pub struct Peer {
+pub(crate) struct Peer {
     state: State,
     counter: u8,
     incoming_pool: RawFrameSlice,
@@ -21,7 +21,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub const fn const_new() -> Self {
+    pub(crate) const fn const_new() -> Self {
         Self {
             state: State::Free,
             counter: 0,
@@ -40,7 +40,7 @@ impl Peer {
         self.counter = 0;
     }
 
-    pub fn promote_to_active(&mut self) {
+    pub(crate) fn promote_to_active(&mut self) {
         if self.state != State::Pending {
             panic!();
         }
@@ -51,7 +51,7 @@ impl Peer {
         self.counter = 0;
     }
 
-    pub fn promote_to_pending(&mut self, mac: u64) {
+    pub(crate) fn promote_to_pending(&mut self, mac: u64) {
         if self.state != State::Free {
             panic!();
         }
@@ -62,11 +62,11 @@ impl Peer {
         self.counter = 0;
     }
 
-    pub fn set_success(&mut self) {
+    pub(crate) fn set_success(&mut self) {
         self.counter = 0;
     }
 
-    pub fn increment_error(&mut self) {
+    pub(crate) fn increment_error(&mut self) {
         match self.state {
             State::Free => {
                 // uh?
@@ -94,7 +94,7 @@ impl Peer {
     }
 
     #[inline]
-    pub fn is_pending(&self) -> Option<u64> {
+    pub(crate) fn is_pending(&self) -> Option<u64> {
         if self.state == State::Pending {
             Some(self.mac)
         } else {
@@ -103,29 +103,29 @@ impl Peer {
     }
 
     #[inline]
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.state == State::Active
     }
 
     #[inline]
-    pub fn mac(&self) -> u64 {
+    pub(crate) fn mac(&self) -> u64 {
         self.mac
     }
 
     #[inline]
-    pub fn is_idle(&mut self) -> bool {
+    pub(crate) fn is_idle(&self) -> bool {
         if self.state != State::Free {
             return false;
         }
         self.incoming_pool.count_allocatable() == INCOMING_SIZE
     }
 
-    pub fn alloc_incoming(&mut self) -> Option<FrameBox> {
+    pub(crate) fn alloc_incoming(&mut self) -> Option<FrameBox> {
         self.incoming_pool.allocate_raw()
     }
 
     #[inline]
-    pub fn is_active_mac(&self, mac: u64) -> bool {
+    pub(crate) fn is_active_mac(&self, mac: u64) -> bool {
         if self.state != State::Active {
             return false;
         }
@@ -133,39 +133,28 @@ impl Peer {
     }
 
     #[inline]
-    pub fn enqueue_incoming(&mut self, msg: FrameBox) {
+    pub(crate) fn enqueue_incoming(&mut self, msg: FrameBox) {
         // The deque length is the same as the pool size,
         // so this should never fail.
         self.from_peer.push_front(msg).map_err(drop).unwrap();
     }
 
     #[inline]
-    pub fn enqueue_outgoing(&mut self, msg: FrameBox) -> Result<(), FrameBox> {
+    pub(crate) fn enqueue_outgoing(&mut self, msg: FrameBox) -> Result<(), FrameBox> {
         self.to_peer.push_front(msg)
     }
 
     #[inline]
-    pub fn dequeue_incoming(&mut self) -> Option<FrameBox> {
+    pub(crate) fn dequeue_incoming(&mut self) -> Option<FrameBox> {
         self.from_peer.pop_back()
     }
 
     #[inline]
-    pub fn dequeue_outgoing(&mut self) -> Option<FrameBox> {
+    pub(crate) fn dequeue_outgoing(&mut self) -> Option<FrameBox> {
         self.to_peer.pop_back()
     }
 
-    pub fn new(pool: RawFrameSlice) -> Self {
-        Self {
-            state: State::Free,
-            counter: 0,
-            incoming_pool: pool,
-            mac: 0,
-            to_peer: Deque::new(),
-            from_peer: Deque::new(),
-        }
-    }
-
-    pub fn set_pool(&mut self, pool: RawFrameSlice) {
+    pub(crate) fn set_pool(&mut self, pool: RawFrameSlice) {
         self.incoming_pool = pool;
     }
 }

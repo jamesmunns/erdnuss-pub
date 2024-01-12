@@ -117,7 +117,7 @@ impl RawFrameSlice {
         }
     }
 
-    pub fn count_allocatable(&mut self) -> usize {
+    pub fn count_allocatable(&self) -> usize {
         if self.len == 0 {
             return 0;
         }
@@ -128,7 +128,7 @@ impl RawFrameSlice {
             // Scope access of subfield so all references are dropped before we make the
             // non-null
             {
-                let atom_ptr: *mut AtomicU8 = unsafe { addr_of_mut!((*ptr).freelen) };
+                let atom_ptr: *const AtomicU8 = unsafe { addr_of!((*ptr).freelen) };
                 let atom: &AtomicU8 = unsafe { &*atom_ptr };
 
                 // IF the value is zero, we have mutable exclusive access to allocate it.

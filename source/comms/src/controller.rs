@@ -2,18 +2,21 @@
 //!
 //! The Controller is responsible for running the bus.
 
-use core::ops::DerefMut;
+use core::{fmt::Debug, ops::DerefMut};
 
 use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
-use embassy_time::{with_timeout, Duration};
+use embassy_time::{with_timeout, Duration, TimeoutError};
 use rand_core::RngCore;
 
 use crate::{
     frame_pool::{FrameBox, RawFrameSlice},
     peer::{Peer, INCOMING_SIZE},
-    wirehelp::{WireFrameBox, SendFrameBox},
-    CmdAddr, FrameSerial, MAX_TARGETS,
+    wirehelp::{SendFrameBox, WireFrameBox},
+    CmdAddr, Error, FrameSerial, MAX_TARGETS,
 };
+
+/// Time that a Controller will wait for a Target to respond
+pub const REPLY_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// Controller interface and data storage
 ///
@@ -106,7 +109,7 @@ impl<R: RawMutex + 'static> Controller<R> {
     pub async fn step<T, Rand>(&self, serial: &mut T, rand: &mut Rand)
     where
         T: FrameSerial,
-        Rand: RngCore
+        Rand: RngCore,
     {
         let mut inner = self.peers.lock().await;
         serve_peers(inner.deref_mut(), serial).await;
@@ -117,16 +120,18 @@ impl<R: RawMutex + 'static> Controller<R> {
 
 /// Bus I/O methods
 impl<R: RawMutex + 'static> Controller<R> {
-    // TODO: These shouldn't have FrameBox, they should have some other
-    // type that hides the headers and stuff
+    /// Attempt to enqueue a message for sending
     pub async fn send(&self, mac: u64, frame: SendFrameBox) -> Result<(), SendError> {
-        let mut inner = self.peers.lock().await;
-        for p in inner.iter_mut() {
-            if p.is_active_mac(mac) {
-                return p.enqueue_outgoing(frame.into_inner()).map_err(|_| SendError::QueueFull);
-            }
-        }
-        Err(SendError::NoMatchingMac)
+        self.peers
+            .lock()
+            .await
+            .iter_mut()
+            .find(|p| p.is_active_mac(mac))
+            .ok_or(SendError::NoMatchingMac)
+            .and_then(|p| {
+                p.enqueue_outgoing(frame.into_inner())
+                    .map_err(SendError::QueueFull)
+            })
     }
 
     /// Attempt to receive a message from the given unique address
@@ -141,42 +146,76 @@ impl<R: RawMutex + 'static> Controller<R> {
             .map(WireFrameBox::new_unchecked)
     }
 
-
-
-    pub async fn connected(&self) -> heapless::Vec<u64, MAX_TARGETS> {
-        let mut out = heapless::Vec::new();
-        let inner = self.peers.lock().await;
-        for p in inner.iter() {
-            if p.is_active() {
-                let _ = out.push(p.mac());
-            }
-        }
-        out
+    /// Get a list of all target devices on the bus
+    ///
+    /// This list DOES NOT include the Controller's MAC address, but the returned
+    /// [`heapless::Vec`] *does* reserve enough room to contain all [MAX_TARGETS]
+    /// plus one.
+    pub async fn connected(&self) -> heapless::Vec<u64, { MAX_TARGETS + 1 }> {
+        self.peers
+            .lock()
+            .await
+            .iter()
+            .filter_map(|p| p.is_active().then_some(p.mac()))
+            .collect()
     }
 }
 
+/// An error when sending a frame to a Target
 pub enum SendError {
+    /// Attempted to send to an unknown MAC address
     NoMatchingMac,
-    QueueFull,
+    /// The given MAC address was known, but the outgoing queue
+    /// of this device is full
+    QueueFull(FrameBox),
 }
 
+impl Debug for SendError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SendError::")?;
+        let remain = match self {
+            SendError::NoMatchingMac => "NoMatchingMac",
+            SendError::QueueFull(_) => "QueueFull(...)",
+        };
+        f.write_str(remain)
+    }
+}
+
+/// An error when attempting to receive a frame from a Target
+#[derive(Debug, PartialEq)]
 pub enum RecvError {
+    /// Attempted to receive from an unknown MAC address
     NoMatchingMac,
+    /// The given MAC address was known, but the incoming queue
+    /// of this device was empty
     NoMessage,
 }
 
-async fn serve_peers<T: FrameSerial>(inner: &mut [Peer; MAX_TARGETS], serial: &mut T) {
+/// A helper function that serves all currently active peers, exchanging
+/// zero or one frames in each direction
+async fn serve_peers<T: FrameSerial>(
+    inner: &mut [Peer; MAX_TARGETS],
+    serial: &mut T,
+) -> Result<(), Error<T::SerError>> {
     // First pass: poll all active devices
     for (i, p) in inner.iter_mut().enumerate() {
+        // We only care about active devices
         if !p.is_active() {
             continue;
         }
-        // Can we allocate a reception frame?
+
+        // Can we allocate a reception frame? If not: we can't talk to the device, skip it
+        // for a single round. In the future, we might want to increment error here to
+        // eventually time out devices, but this isn't really the fault of the target, it's
+        // a fault of the firmware driving the "controller".
         let Some(mut rx) = p.alloc_incoming() else {
             defmt::println!("Couldn't alloc incoming!");
             p.increment_error();
             continue;
         };
+
+        // Is there any outgoing frame? If not, we use a one byte fallback buffer
+        // to place the "Select" command in.
         let mut maybe_out = p.dequeue_outgoing();
         let mut fallback = [0u8; 1];
         let to_send = match maybe_out.as_deref_mut() {
@@ -184,45 +223,71 @@ async fn serve_peers<T: FrameSerial>(inner: &mut [Peer; MAX_TARGETS], serial: &m
             None => &mut fallback,
         };
 
+        // Fill in the cmdaddr, send the message, and start listening with a
+        // timeout
         to_send[0] = CmdAddr::SelectAddr(i as u8).into();
-        serial.send_frame(to_send).await.map_err(drop).unwrap();
-        let rxto = with_timeout(Duration::from_millis(1), serial.recv(&mut rx));
+        serial.send_frame(to_send).await?;
+        let rxto = with_timeout(REPLY_TIMEOUT, serial.recv(&mut rx));
 
         match rxto.await {
             Ok(Ok(tf)) => {
+                // We received a message within the timeout!
                 let len = tf.frame.len();
                 if len != 0 && tf.frame[0] == CmdAddr::ReplyFromAddr(i as u8).into() {
+                    // We got AT least an ack, mark that as a success
+                    p.set_success();
+
+                    // If there was some kind of body, pass it on
                     if len > 1 {
                         defmt::println!("Got msg len {=usize} for {=usize}", len, i);
                         rx.set_len(len);
                         p.enqueue_incoming(rx);
-                        p.set_success();
                     }
                 } else {
+                    // We got a zero len message, OR an unexpected reply. Mark an error.
                     defmt::println!("Error with {=usize} len is {=usize}", i, len);
                     p.increment_error();
                 }
             }
-            Ok(Err(_e)) => continue,
-            Err(_) => {
-                // timed out
+            Ok(Err(e)) => {
+                // We finished within the timeout, but got some kind of error
+                // while receiving. Increment the error, in case we don't just
+                // decide to reset or something.
+                p.increment_error();
+
+                // then bubble up the error.
+                return Err(e);
+            }
+            Err(TimeoutError) => {
+                // We timed out, increment error
                 p.increment_error();
             }
         }
     }
+    Ok(())
 }
 
-async fn complete_pendings<T: FrameSerial>(inner: &mut [Peer; MAX_TARGETS], serial: &mut T) {
+/// A helper function for moving targets from the Pending stage to the Active stage
+async fn complete_pendings<T: FrameSerial>(
+    inner: &mut [Peer; MAX_TARGETS],
+    serial: &mut T,
+) -> Result<(), Error<T::SerError>> {
     for (i, p) in inner.iter_mut().enumerate() {
+        // Only worry about pending nodes
         let Some(mac) = p.is_pending() else {
             continue;
         };
+
+        // Send a message with the expected MAC address for confirmation
         let mut out_buf = [0u8; 9];
         out_buf[0] = CmdAddr::DiscoverySuccess(i as u8).into();
         out_buf[1..9].copy_from_slice(&mac.to_le_bytes());
+
+        // We should only get back an empty ACK and nothing else
         let mut in_buf = [0u8; 2];
-        serial.send_frame(&out_buf).await.map_err(drop).unwrap();
-        let rxto = with_timeout(Duration::from_millis(1), serial.recv(&mut in_buf));
+        serial.send_frame(&out_buf).await?;
+        let rxto = with_timeout(REPLY_TIMEOUT, serial.recv(&mut in_buf));
+
         match rxto.await {
             Ok(Ok(tf)) => {
                 let frame = tf.frame;
@@ -235,57 +300,63 @@ async fn complete_pendings<T: FrameSerial>(inner: &mut [Peer; MAX_TARGETS], seri
                     p.increment_error();
                 }
             }
-            Ok(Err(_e)) => continue,
-            Err(_) => {
+            Ok(Err(_e)) => {
+                // We got some kind of receive error, just mark this as
+                // an error and move on
+                p.increment_error();
+                continue
+            },
+            Err(TimeoutError) => {
+                // No answer? No address.
                 p.increment_error();
             }
         }
     }
+    Ok(())
 }
 
+/// A helper function for moving new nodes into the Pending stage
 async fn offer_addr<T: FrameSerial, R: RngCore>(
     inner: &mut [Peer; MAX_TARGETS],
     serial: &mut T,
     rand: &mut R,
-) {
-    for (i, p) in inner.iter_mut().enumerate() {
-        if !p.is_idle() {
-            continue;
-        }
+) -> Result<(), Error<T::SerError>> {
+    let Some((i, p)) = inner.iter_mut().enumerate().find(|(_i, p)| p.is_idle()) else {
+        return Ok(());
+    };
 
-        // We found an idle slot! Offer it up.
-        let mut out_buf = [0u8; 9];
-        out_buf[0] = CmdAddr::DiscoveryOffer(i as u8).into();
-        rand.fill_bytes(&mut out_buf[1..9]);
-        let mut in_buf = [0u8; 10];
-        serial.send_frame(&out_buf).await.map_err(drop).unwrap();
+    // We found an idle slot! Offer it up.
+    let mut out_buf = [0u8; 9];
+    out_buf[0] = CmdAddr::DiscoveryOffer(i as u8).into();
+    rand.fill_bytes(&mut out_buf[1..9]);
+    serial.send_frame(&out_buf).await?;
 
-        let rxto = with_timeout(Duration::from_millis(1), serial.recv(&mut in_buf));
-        match rxto.await {
-            Ok(Ok(tf)) => {
-                let frame = tf.frame;
-                let good_len = frame.len() == 9;
-                let good_hdr = good_len && frame[0] == CmdAddr::DiscoveryClaim(i as u8).into();
+    let mut in_buf = [0u8; 10];
+    let rxto = with_timeout(Duration::from_millis(1), serial.recv(&mut in_buf));
+    match rxto.await {
+        Ok(Ok(tf)) => {
+            let frame = tf.frame;
+            let good_len = frame.len() == 9;
+            let good_hdr = good_len && frame[0] == CmdAddr::DiscoveryClaim(i as u8).into();
 
-                if good_hdr {
-                    let mut mac = [0u8; 8];
-                    let rand_iter = out_buf[1..9].iter();
-                    let resp_iter = frame[1..9].iter();
+            if good_hdr {
+                let mut mac = [0u8; 8];
+                let rand_iter = out_buf[1..9].iter();
+                let resp_iter = frame[1..9].iter();
 
-                    mac.iter_mut()
-                        .zip(rand_iter.zip(resp_iter))
-                        .for_each(|(d, (a, b))| *d = *a ^ *b);
+                mac.iter_mut()
+                    .zip(rand_iter.zip(resp_iter))
+                    .for_each(|(d, (a, b))| *d = *a ^ *b);
 
-                    p.promote_to_pending(u64::from_le_bytes(mac));
-                }
-            }
-            Ok(Err(_e)) => return,
-            Err(_) => {
-                // Timed out, no one wanted the address
+                p.promote_to_pending(u64::from_le_bytes(mac));
             }
         }
-
-        // Only offer one address per round.
-        return;
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            // Timed out, no one wanted the address
+        }
     }
+
+
+    Ok(())
 }
