@@ -9,9 +9,8 @@ use embassy_time::{with_timeout, Duration, TimeoutError};
 use rand_core::RngCore;
 
 use crate::{
-    frame_pool::{FrameBox, RawFrameSlice},
-    peer::{Peer, INCOMING_SIZE},
-    wirehelp::{SendFrameBox, WireFrameBox},
+    frame_pool::{FrameBox, RawFrameSlice, SendFrameBox, WireFrameBox},
+    peer::{Peer, INCOMING_SIZE, OUTGOING_SIZE},
     CmdAddr, Error, FrameSerial, MAX_TARGETS,
 };
 
@@ -35,12 +34,18 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_millis(1);
 ///
 /// The Controller contains an async Mutex which provides interior mutable access to
 /// information such as the table of connected Targets, or any "in flight" messages.
-pub struct Controller<R: RawMutex + 'static> {
-    peers: Mutex<R, [Peer; MAX_TARGETS]>,
+pub struct Controller<
+    R: RawMutex + 'static,
+    const IN: usize = INCOMING_SIZE,
+    const OUT: usize = OUTGOING_SIZE,
+> {
+    peers: Mutex<R, [Peer<IN, OUT>; MAX_TARGETS]>,
 }
 
 /// Instantiation and Initialization methods
-impl<R: RawMutex + 'static> Controller<R> {
+impl<R: RawMutex + 'static, const IN: usize, const OUT: usize> Controller<R, IN, OUT> {
+    const ONE: Peer<IN, OUT> = Peer::<IN, OUT>::const_new();
+
     /// Create a new, uninitialized controller structure
     ///
     /// Intended to be used to create as a static to avoid large
@@ -56,17 +61,16 @@ impl<R: RawMutex + 'static> Controller<R> {
     /// // if you not using this from an interrupt context
     /// static CONTROLLER: Controller<CriticalSectionRawMutex> = Controller::uninit();
     /// ```
-    pub const fn uninit() -> Self {
-        const ONE: Peer = Peer::const_new();
+    pub const fn uninit() -> Controller<R, IN, OUT> {
         Self {
-            peers: Mutex::new([ONE; MAX_TARGETS]),
+            peers: Mutex::new([Self::ONE; MAX_TARGETS]),
         }
     }
 
     /// Initialize the [Controller]
     ///
     /// This initialization provides the backing storage for the incoming target
-    /// frames. [RawFrameSlice] must contain AT LEAST [INCOMING_SIZE] times [MAX_TARGETS]
+    /// frames. [RawFrameSlice] must contain AT LEAST `IN` times `OUT`
     /// frame storage slots. `sli`'s capacity will be reduced by this amount.
     pub async fn init(&self, sli: &mut RawFrameSlice) {
         assert!(sli.capacity() >= (INCOMING_SIZE * MAX_TARGETS));
@@ -106,15 +110,20 @@ impl<R: RawMutex + 'static> Controller<R> {
     /// `step`, which may be held for some amount of time, depending on the number of
     /// bus timeouts and total amount of data transferred. This may be on the order of
     /// millisecond(s).
-    pub async fn step<T, Rand>(&self, serial: &mut T, rand: &mut Rand)
+    pub async fn step<T, Rand>(
+        &self,
+        serial: &mut T,
+        rand: &mut Rand,
+    ) -> Result<(), Error<T::SerError>>
     where
         T: FrameSerial,
         Rand: RngCore,
     {
         let mut inner = self.peers.lock().await;
-        serve_peers(inner.deref_mut(), serial).await;
-        complete_pendings(inner.deref_mut(), serial).await;
-        offer_addr(inner.deref_mut(), serial, rand).await;
+        serve_peers(inner.deref_mut(), serial).await?;
+        complete_pendings(inner.deref_mut(), serial).await?;
+        offer_addr(inner.deref_mut(), serial, rand).await?;
+        Ok(())
     }
 }
 
@@ -209,7 +218,7 @@ async fn serve_peers<T: FrameSerial>(
         // eventually time out devices, but this isn't really the fault of the target, it's
         // a fault of the firmware driving the "controller".
         let Some(mut rx) = p.alloc_incoming() else {
-            defmt::println!("Couldn't alloc incoming!");
+            nut_warn!("Couldn't alloc incoming!");
             p.increment_error();
             continue;
         };
@@ -239,13 +248,13 @@ async fn serve_peers<T: FrameSerial>(
 
                     // If there was some kind of body, pass it on
                     if len > 1 {
-                        defmt::println!("Got msg len {=usize} for {=usize}", len, i);
+                        nut_trace!("Got msg len {=usize} for {=usize}", len, i);
                         rx.set_len(len);
                         p.enqueue_incoming(rx);
                     }
                 } else {
                     // We got a zero len message, OR an unexpected reply. Mark an error.
-                    defmt::println!("Error with {=usize} len is {=usize}", i, len);
+                    nut_warn!("Error with {=usize} len is {=usize}", i, len);
                     p.increment_error();
                 }
             }
@@ -294,7 +303,7 @@ async fn complete_pendings<T: FrameSerial>(
                 let good_len = frame.len() == 1;
                 let good_hdr = good_len && frame[0] == CmdAddr::ReplyFromAddr(i as u8).into();
                 if good_hdr {
-                    defmt::println!("Promoting to active {=usize} {=u64}", i, mac);
+                    nut_info!("Promoting to active {=usize} {=u64}", i, mac);
                     p.promote_to_active();
                 } else {
                     p.increment_error();
@@ -304,8 +313,8 @@ async fn complete_pendings<T: FrameSerial>(
                 // We got some kind of receive error, just mark this as
                 // an error and move on
                 p.increment_error();
-                continue
-            },
+                continue;
+            }
             Err(TimeoutError) => {
                 // No answer? No address.
                 p.increment_error();
@@ -356,7 +365,6 @@ async fn offer_addr<T: FrameSerial, R: RngCore>(
             // Timed out, no one wanted the address
         }
     }
-
 
     Ok(())
 }

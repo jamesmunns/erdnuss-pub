@@ -1,17 +1,90 @@
+//! Frame Pool
+//!
+//! This is a specialized pool allocator. It is optimized and
+//! opinionated for the following cases:
+//!
+//! * Use where you want to store multiple chunks of bytes,
+//!   in the size range of 1..=255 bytes
+//! * Use in cases where the target may not have CAS atomics,
+//!   so only `load` and `stores` are used for synchronization
+//!
+//! This allows for the creation of [`FrameBox`] allocations, that
+//! can only be allocated with exclusive access to a [`RawFrameSlice`],
+//! but can be deallocated by dropping (just like a Box from the standard
+//! library), and do not require any kind of mutex at the time of drop.
+
 use core::{
     ops::{Deref, DerefMut},
     ptr::{addr_of, addr_of_mut, NonNull},
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
     unreachable,
 };
 use grounded::{const_init::ConstInit, uninit::GroundedArrayCell};
 
+use crate::CmdAddr;
+
+/// Storage for exactly N frames
+pub struct FrameStorage<const N: usize> {
+    frames: GroundedArrayCell<RawFrame, N>,
+    once: AtomicBool,
+}
+
+impl<const N: usize> FrameStorage<N> {
+    /// Create a new frame storage buffer
+    ///
+    /// Intended for static usage.
+    pub const fn new() -> Self {
+        Self {
+            frames: GroundedArrayCell::const_init(),
+            once: AtomicBool::new(false),
+        }
+    }
+
+    /// Attempt to take the storage as a [RawFrameSlice]
+    ///
+    /// The first call will return Some, all later calls will
+    /// return None. Uses a [critical section][critical_section::with]
+    /// to ensure it only works once, even on targets without atomics
+    pub fn take(&'static self) -> Option<RawFrameSlice> {
+        self.take_gac()
+            .map(|s| unsafe { RawFrameSlice::from_static(s) })
+    }
+
+    fn take_gac(&'static self) -> Option<&'static GroundedArrayCell<RawFrame, N>> {
+        critical_section::with(|_| {
+            let old = self.once.load(Ordering::Acquire);
+            self.once.store(true, Ordering::Release);
+            !old
+        })
+        .then_some(&self.frames)
+    }
+}
+
+/// The Rules:
+///
+/// `freelen` serves two functions:
+///
+/// * When NOT allocated, it must always be zero.
+/// * When allocated, it represents the "len" of the frame, and
+///   must ALWAYS be NONZERO.
+///
+/// ONLY the RawFrameSlice is allowed to make the zero -> nonzero
+/// transition, when the freelen is nonzero, it MUST NOT read or write
+/// the data field, nor write to freelen.
+///
+/// ONLY the FrameBox is allowed to make the nonzero -> zero transition.
+/// Setting freelen to zero represents giving up exclusive access to the
+/// contents of the data field.
 #[repr(C)]
-pub struct RawFrame {
+pub(crate) struct RawFrame {
     data: [u8; 255],
     freelen: AtomicU8,
 }
 
+/// An allocated frame storage
+///
+/// Stores `1..=255` bytes. Storage can be accessed through the
+/// [Deref] and [DerefMut] traits.
 pub struct FrameBox {
     ptr: NonNull<RawFrame>,
 }
@@ -24,6 +97,11 @@ impl FrameBox {
         &*fl_ptr
     }
 
+    /// Sets the length of the storage.
+    ///
+    /// ## Panics
+    ///
+    /// `len` must be >= 1 and <= 255 or this function will panic
     pub fn set_len(&mut self, len: usize) {
         if len == 0 || len > 255 {
             unreachable!()
@@ -39,6 +117,9 @@ impl Deref for FrameBox {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
+        // Ordering can be relaxed as we have exclusive access to the
+        // backing storage, and exclusive WRITE access to freelen as
+        // long as the FrameBox exists.
         let len = unsafe { self.freelen_ref().load(Ordering::Relaxed) };
         assert!(len != 0);
         let data_ptr: *const u8 = unsafe {
@@ -51,6 +132,9 @@ impl Deref for FrameBox {
 
 impl DerefMut for FrameBox {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // Ordering can be relaxed as we have exclusive access to the
+        // backing storage, and exclusive WRITE access to freelen as
+        // long as the FrameBox exists.
         let len = unsafe { self.freelen_ref().load(Ordering::Relaxed) };
         assert!(len != 0);
         let data_ptr: *mut u8 = unsafe {
@@ -89,6 +173,10 @@ impl ConstInit for RawFrame {
 
 unsafe impl Send for RawFrameSlice {}
 
+/// A sliceable allocation pool
+///
+/// Can be created via [FrameStorage::take()], or by splitting
+/// via [RawFrameSlice::split()].
 pub struct RawFrameSlice {
     start: NonNull<RawFrame>,
     len: usize,
@@ -99,7 +187,7 @@ impl RawFrameSlice {
     /// ## Safety
     ///
     /// You must only ever call this once
-    pub unsafe fn from_static<const N: usize>(
+    pub(crate) unsafe fn from_static<const N: usize>(
         buf: &'static GroundedArrayCell<RawFrame, N>,
     ) -> Self {
         Self {
@@ -109,6 +197,8 @@ impl RawFrameSlice {
         }
     }
 
+    /// Create a new, empty [RawFrameSlice] that has no
+    /// backing storage.
     pub const fn uninit() -> Self {
         Self {
             start: NonNull::dangling(),
@@ -117,6 +207,7 @@ impl RawFrameSlice {
         }
     }
 
+    /// Count the number of allocatable items
     pub fn count_allocatable(&self) -> usize {
         if self.len == 0 {
             return 0;
@@ -140,6 +231,12 @@ impl RawFrameSlice {
         ct
     }
 
+    /// Attempt to allocate a [FrameBox] from the backing storage
+    /// available to this [RawFrameSlice].
+    ///
+    /// This allocation performs a linear search of the backing
+    /// storage, so allocation is `O(n)`. Returns [None] if no
+    /// storage slots were available.
     pub fn allocate_raw(&mut self) -> Option<FrameBox> {
         if self.len == 0 {
             return None;
@@ -198,7 +295,114 @@ impl RawFrameSlice {
         })
     }
 
+    /// The backing capacity of this [RawFrameSlice].
     pub fn capacity(&self) -> usize {
         self.len
+    }
+}
+
+/// WireFrameBox represents a valid packet received from the wire
+///
+/// It is guaranteed to have a valid `CmdAddr`. It may have no data if
+/// it is an empty message
+pub struct WireFrameBox {
+    fb: FrameBox,
+}
+
+impl WireFrameBox {
+    pub(crate) fn new_unchecked(fb: FrameBox) -> Self {
+        Self { fb }
+    }
+
+    /// Get the [CmdAddr] of this message
+    #[inline]
+    pub fn cmd_addr(&self) -> CmdAddr {
+        self.fb[0].try_into().unwrap()
+    }
+
+    /// Borrow the payload
+    #[inline]
+    pub fn payload(&self) -> &[u8] {
+        &self.fb[1..]
+    }
+
+    /// Mutably borrow the payload
+    #[inline]
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        &mut self.fb[1..]
+    }
+
+    /// Deconstruct the WireFrameBox
+    #[inline]
+    pub fn into_inner(self) -> FrameBox {
+        self.fb
+    }
+
+    /// Is the PAYLOAD empty?
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.fb.len() == 1
+    }
+
+    /// The PAYLOAD len
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.fb.len() - 1
+    }
+
+    /// Set the length of the frame, NOT counting the [CmdAddr] field
+    pub fn set_len(&mut self, len: usize) {
+        self.fb.set_len(1 + len)
+    }
+}
+
+/// SendFrameBox represent a message to be sent over the wire.
+///
+/// Unlike [WireFrameBox], it does NOT have a valid [CmdAddr], which is
+/// assigned at sending time.
+pub struct SendFrameBox {
+    fb: FrameBox,
+}
+
+impl SendFrameBox {
+    /// Get the [CmdAddr] of this message
+    #[inline]
+    pub fn cmd_addr(&self) -> CmdAddr {
+        self.fb[0].try_into().unwrap()
+    }
+
+    /// Borrow the payload
+    #[inline]
+    pub fn payload(&self) -> &[u8] {
+        &self.fb[1..]
+    }
+
+    /// Mutably borrow the payload
+    #[inline]
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        &mut self.fb[1..]
+    }
+
+    /// Deconstruct the SendFrameBox
+    #[inline]
+    pub fn into_inner(self) -> FrameBox {
+        self.fb
+    }
+
+    /// Is the PAYLOAD empty?
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.fb.len() == 1
+    }
+
+    /// The PAYLOAD len
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.fb.len() - 1
+    }
+
+    /// Set the length of the frame, NOT counting the [CmdAddr] field
+    pub fn set_len(&mut self, len: usize) {
+        self.fb.set_len(1 + len)
     }
 }

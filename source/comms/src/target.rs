@@ -1,3 +1,7 @@
+//! Target interface
+//!
+//! This interface is used when operating as a Target.
+
 use embassy_sync::{
     blocking_mutex::raw::RawMutex,
     channel::{Receiver, Sender},
@@ -11,32 +15,76 @@ use crate::{
     CmdAddr, FrameSerial,
 };
 
-pub trait SubCfg {
+/// The default number of "in-flight" packets FROM Target TO Controller
+pub const OUTGOING_SIZE: usize = 8;
+/// The default number of "in-flight" packets FROM Controller TO Target
+pub const INCOMING_SIZE: usize = 4;
+
+/// Metadata trait to contain relevant generics
+pub trait TgtCfg {
+    /// Mutex type used for channels
     type Mutex: RawMutex + 'static;
+
+    /// Serial interface type
     type Serial: FrameSerial;
+
+    /// Random number generator
     type Rand: RngCore;
+
+    /// Amount of time to delay from hearing a response to
+    /// sending a reply.
+    const TURNAROUND_DELAY: Duration;
+
+    /// Amount of time from initiating a claim to getting an address
+    const ADDRESS_CLAIM_TIMEOUT: Duration;
+
+    /// Amount of time being unaddressed before trying to get a new
+    /// address
+    const SELECT_TIMEOUT: Duration;
 }
 
-pub struct Sub<'a, Cfg, const BUFS: usize>
+enum TargetError<S> {
+    Serial(S),
+    Oom,
+}
+
+impl<S> From<crate::Error<S>> for TargetError<S> {
+    fn from(value: crate::Error<S>) -> Self {
+        match value {
+            crate::Error::Serial(s) => Self::Serial(s),
+        }
+    }
+}
+
+/// Interface for the Target
+///
+/// Note that UNLIKE the [`Controller`][crate::Controller], which uses a Mutex to share between the
+/// "application facing" and "wire facing" parts, we instead use a pair of
+/// [`Channel`][embassy_sync::channel::Channel]s for the Target instead.
+///
+/// This is because the Target is MUCH more timing critical, holding a mutex locked when addressed
+/// by the Controller could cause us to totally miss a message.
+pub struct Target<'a, Cfg, const IN: usize = INCOMING_SIZE, const OUT: usize = OUTGOING_SIZE>
 where
-    Cfg: SubCfg,
+    Cfg: TgtCfg,
 {
     serial: Cfg::Serial,
-    to_app: Sender<'a, Cfg::Mutex, FrameBox, BUFS>,
-    from_app: Receiver<'a, Cfg::Mutex, FrameBox, BUFS>,
+    to_app: Sender<'a, Cfg::Mutex, FrameBox, IN>,
+    from_app: Receiver<'a, Cfg::Mutex, FrameBox, OUT>,
     pool: RawFrameSlice,
     mac: [u8; 8],
     rand: Cfg::Rand,
 }
 
-impl<'a, Cfg, const BUFS: usize> Sub<'a, Cfg, BUFS>
+impl<'a, Cfg, const IN: usize, const OUT: usize> Target<'a, Cfg, IN, OUT>
 where
-    Cfg: SubCfg,
+    Cfg: TgtCfg,
 {
+    /// Create a new [Target] worker.
     pub fn new(
         serial: Cfg::Serial,
-        to_app: Sender<'a, Cfg::Mutex, FrameBox, BUFS>,
-        from_app: Receiver<'a, Cfg::Mutex, FrameBox, BUFS>,
+        to_app: Sender<'a, Cfg::Mutex, FrameBox, IN>,
+        from_app: Receiver<'a, Cfg::Mutex, FrameBox, OUT>,
         pool: RawFrameSlice,
         mac: [u8; 8],
         rand: Cfg::Rand,
@@ -51,23 +99,24 @@ where
         }
     }
 
+    /// Run forever, exchanging messages
     pub async fn run(&mut self) {
         'outer: loop {
             let addr = self.get_addr().await;
-            defmt::println!("Got addr: {=u8}", addr);
+            nut_info!("Got addr: {=u8}", addr);
 
             loop {
-                match with_timeout(Duration::from_secs(3), self.exchange_one(addr)).await {
+                match with_timeout(Cfg::SELECT_TIMEOUT, self.exchange_one(addr)).await {
                     // Exchange happened w/in timeout
                     Ok(Ok(())) => {}
                     // Exchange happened w/in timeout, but errored
                     Ok(Err(_)) => {
-                        defmt::println!("Error :(");
+                        nut_error!("Error :(");
                         continue 'outer;
                     }
                     // Timed out
                     Err(_) => {
-                        defmt::println!("Timed out!");
+                        nut_warn!("Timed out!");
                         continue 'outer;
                     }
                 }
@@ -78,7 +127,7 @@ where
     async fn exchange_one(
         &mut self,
         addr: u8,
-    ) -> Result<(), crate::Error<<Cfg::Serial as FrameSerial>::SerError>> {
+    ) -> Result<(), TargetError<<Cfg::Serial as FrameSerial>::SerError>> {
         // Wait for us to be acknowledged, and pass on the frame if we get one
         let time = self.get_incoming(addr).await?;
 
@@ -92,7 +141,7 @@ where
         out[0] = CmdAddr::ReplyFromAddr(addr).into();
 
         // Send reply
-        Timer::at(time + Duration::from_micros(25)).await;
+        Timer::at(time + Cfg::TURNAROUND_DELAY).await;
         self.serial.send_frame(out).await?;
         Ok(())
     }
@@ -100,8 +149,8 @@ where
     async fn get_incoming(
         &mut self,
         addr: u8,
-    ) -> Result<crate::Instant, crate::Error<<Cfg::Serial as FrameSerial>::SerError>> {
-        let mut frame = self.pool.allocate_raw().unwrap();
+    ) -> Result<crate::Instant, TargetError<<Cfg::Serial as FrameSerial>::SerError>> {
+        let mut frame = self.pool.allocate_raw().ok_or(TargetError::Oom)?;
         loop {
             let buf = &mut frame[..];
             let got = self.serial.recv(buf).await?;
@@ -127,7 +176,7 @@ where
 
     async fn get_addr(&mut self) -> u8 {
         loop {
-            defmt::println!("get_addr...");
+            nut_info!("get_addr...");
             let goforit = self.rand.next_u32();
 
             // Wait for an offer frame
@@ -135,10 +184,10 @@ where
 
             // do we go for it? (1/8 chance)
             if goforit & 0b0000_0111 != 0 {
-                defmt::println!("skipping!");
+                nut_info!("skipping!");
                 continue;
             } else {
-                defmt::println!("going for it!");
+                nut_info!("going for it!");
             }
 
             let claim_dance = async {
@@ -146,11 +195,11 @@ where
                 self.get_success(offer_addr).await?;
                 let msg: [u8; 1] = [CmdAddr::ReplyFromAddr(offer_addr).into()];
                 self.serial.send_frame(&msg).await?;
-                Result::<(), crate::Error<<Cfg::Serial as FrameSerial>::SerError>>::Ok(())
+                Result::<(), TargetError<<Cfg::Serial as FrameSerial>::SerError>>::Ok(())
             };
 
             // Give ourselves some time to complete, if not try again
-            match with_timeout(Duration::from_secs(3), claim_dance).await {
+            match with_timeout(Cfg::ADDRESS_CLAIM_TIMEOUT, claim_dance).await {
                 Ok(Ok(())) => return offer_addr,
                 _ => continue,
             }
@@ -160,12 +209,12 @@ where
     async fn get_success(
         &mut self,
         offer_addr: u8,
-    ) -> Result<(), crate::Error<<Cfg::Serial as FrameSerial>::SerError>> {
+    ) -> Result<(), TargetError<<Cfg::Serial as FrameSerial>::SerError>> {
         // A success packet should be 9 bytes plus one extra for
         // the line break.
         let mut scratch = [0u8; 16];
         loop {
-            defmt::println!("get success");
+            nut_info!("get success");
             let Ok(tframe) = self.serial.recv(&mut scratch).await else {
                 // log: wat
                 // NOTE: I feel like this is probably going to be due to
@@ -203,8 +252,8 @@ where
         &mut self,
         offer_addr: u8,
         challenge: &[u8; 8],
-    ) -> Result<(), crate::Error<<Cfg::Serial as FrameSerial>::SerError>> {
-        defmt::println!("send claim");
+    ) -> Result<(), TargetError<<Cfg::Serial as FrameSerial>::SerError>> {
+        nut_info!("send claim");
         let mut claim = [0u8; 9];
 
         claim[0] = CmdAddr::DiscoveryClaim(offer_addr).into();
@@ -215,7 +264,8 @@ where
             .zip(challenge.iter())
             .for_each(|(a, b)| *a ^= *b);
 
-        self.serial.send_frame(&claim).await
+        self.serial.send_frame(&claim).await?;
+        Ok(())
     }
 
     async fn get_offer(&mut self) -> (u8, [u8; 8]) {

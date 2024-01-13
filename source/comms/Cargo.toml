@@ -1,6 +1,6 @@
 [package]
 name            = "erdnuss-comms"
-version         = "0.9.9"
+version         = "0.99.9"
 authors         = ["James Munns <james@onevariable.com>"]
 edition         = "2021"
 readme          = "README.md"
@@ -10,12 +10,15 @@ license         = "MPL-2.0"
 documentation   = "https://docs.rs/erdnuss-comms/"
 
 [dependencies]
-embassy-sync    = "0.5.0"
-grounded        = "0.2"
-heapless        = "0.7.0"
-rand_core       = "0.6.4"
-defmt           = "0.3"
-postcard-rpc    = "0.3"
+embassy-sync        = "0.5.0"
+grounded            = "0.2"
+heapless            = "0.7.0"
+rand_core           = "0.6.4"
+critical-section    = "1.1.2"
+
+[dependencies.defmt]
+version             = "0.3"
+optional            = true
 
 [dependencies.embassy-time]
 version             = "0.2"
@@ -29,11 +32,32 @@ features            = ["async-await"]
 [dependencies.postcard]
 version             = "1.0"
 features            = ["experimental-derive", "heapless"]
+optional            = true
+
+[dependencies.postcard-rpc]
+version             = "0.3"
+optional            = true
 
 [dependencies.serde]
 version             = "1.0"
 default-features    = false
 features            = ["derive"]
+optional            = true
 
 [features]
-default = []
+default = [
+    "postcard-rpc-helpers",
+]
+
+# Helpers for creating postcard-rpc formatted messages
+# on the wire
+postcard-rpc-helpers = [
+    "dep:serde",
+    "dep:postcard-rpc",
+    "dep:postcard",
+]
+
+# Enable defmt logging
+defmt-logging = [
+    "dep:defmt",
+]

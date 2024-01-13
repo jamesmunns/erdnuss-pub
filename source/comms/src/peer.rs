@@ -1,7 +1,11 @@
+//! Peer
+
 use crate::frame_pool::{FrameBox, RawFrameSlice};
 use heapless::Deque;
 
+/// The default number of "in-flight" packets FROM Controller TO Target
 pub const OUTGOING_SIZE: usize = 8;
+/// The default number of "in-flight" packets FROM Target TO Controller
 pub const INCOMING_SIZE: usize = 4;
 
 #[derive(Debug, PartialEq)]
@@ -11,16 +15,16 @@ enum State {
     Active,
 }
 
-pub(crate) struct Peer {
+pub(crate) struct Peer<const IN: usize = INCOMING_SIZE, const OUT: usize = OUTGOING_SIZE> {
     state: State,
     counter: u8,
     incoming_pool: RawFrameSlice,
     mac: u64,
-    to_peer: Deque<FrameBox, OUTGOING_SIZE>,
-    from_peer: Deque<FrameBox, INCOMING_SIZE>,
+    to_peer: Deque<FrameBox, IN>,
+    from_peer: Deque<FrameBox, OUT>,
 }
 
-impl Peer {
+impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
     pub(crate) const fn const_new() -> Self {
         Self {
             state: State::Free,
@@ -79,14 +83,14 @@ impl Peer {
                 // TODO: We should probably drop all incoming/outgoing messages
                 // in the deques. We may ALSO want to hold this address as "unusable"
                 // for some amount of time, to ensure we don't re-use the address before
-                // the Sub "notices" it has been dropped, to avoid a flaky device from
+                // the Target "notices" it has been dropped, to avoid a flaky device from
                 // incorrectly "sharing" the logical address with a new device.
                 //
                 // We might want a separate "timeout/inhibit" state that is used when
                 // moving from Active -> Free with a timestamp.
                 self.counter += 1;
                 if self.counter > 3 {
-                    defmt::println!("Resetting active device");
+                    nut_warn!("Resetting active device");
                     self.reset_to_free();
                 }
             }

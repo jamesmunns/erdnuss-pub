@@ -152,13 +152,18 @@
 #![allow(async_fn_in_trait)]
 #![warn(missing_docs)]
 
+#[macro_use]
+mod macros;
+
 pub mod controller;
 pub mod frame_pool;
-pub mod peer;
+mod peer;
 pub mod target;
+#[cfg(feature = "postcard-rpc-helpers")]
 pub mod wirehelp;
 use embassy_time::Instant;
 
+/// The maximum number of Targets supported by a Controller.
 pub const MAX_TARGETS: usize = 31;
 
 pub use crate::controller::Controller;
