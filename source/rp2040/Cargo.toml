@@ -13,7 +13,7 @@ documentation   = "https://docs.rs/erdnuss-rp2040/"
 embassy-futures     = "0.1.0"
 
 [dependencies.erdnuss-comms]
-version             = "0.9"
+version             = "0.99"
 path                = "../comms"
 
 [dependencies.embassy-rp]
