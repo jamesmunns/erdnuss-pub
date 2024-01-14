@@ -364,13 +364,13 @@ pub struct SendFrameBox {
     fb: FrameBox,
 }
 
-impl SendFrameBox {
-    /// Get the [CmdAddr] of this message
-    #[inline]
-    pub fn cmd_addr(&self) -> CmdAddr {
-        self.fb[0].try_into().unwrap()
+impl From<FrameBox> for SendFrameBox {
+    fn from(value: FrameBox) -> Self {
+        Self { fb: value }
     }
+}
 
+impl SendFrameBox {
     /// Borrow the payload
     #[inline]
     pub fn payload(&self) -> &[u8] {
