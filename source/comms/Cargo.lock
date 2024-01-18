@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "erdnuss-comms"
-version = "0.999.9"
+version = "0.999.99"
 dependencies = [
  "critical-section",
  "defmt",

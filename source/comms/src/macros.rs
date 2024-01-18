@@ -1,12 +1,12 @@
 #![allow(unused_macros)]
 
 #[cfg(feature = "defmt-logging")]
-macro_rules! net_log {
+macro_rules! nut_log {
     (trace,   $($arg:expr),*) => { defmt::trace!($($arg),*) };
     (debug,   $($arg:expr),*) => { defmt::debug!($($arg),*) };
     (info,    $($arg:expr),*) => { defmt::info!($($arg),*) };
     (warn,    $($arg:expr),*) => { defmt::warn!($($arg),*) };
-    (error,    $($arg:expr),*) => { defmt::error!($($arg),*) };
+    (error,   $($arg:expr),*) => { defmt::error!($($arg),*) };
     (println, $($arg:expr),*) => { defmt::println!($($arg),*) };
 }
 
