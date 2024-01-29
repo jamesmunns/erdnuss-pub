@@ -185,10 +185,12 @@ where
             
             let mut offer_addr = 0;
             let mut offer_challenge: [u8; 8] = [0; 8];
+            let mut has_claim = false;
             // Wait for an offer frame
             let offer_response = self.get_offer().await;
             if let OfferResponse::SuccessFrame(addr) = offer_response {
-                return addr;
+                offer_addr = addr;
+                has_claim = true;
             } else if let OfferResponse::OfferFrame((offer_ad, offer_chall)) = offer_response {
                 offer_addr = offer_ad;
                 offer_challenge = offer_chall;
@@ -196,7 +198,7 @@ where
             
             let goforit = self.rand.next_u32();
             // do we go for it? (1/8 chance)
-            if goforit & 0b0000_0111 != 0 {
+            if !has_claim && goforit & 0b0000_0111 != 0 {
                 nut_info!("skipping!");
                 continue;
             } else {
@@ -204,8 +206,10 @@ where
             }
 
             let claim_dance = async {
-                self.send_claim(offer_addr, &offer_challenge).await?;
-                self.get_success(offer_addr).await?;
+                if !has_claim {
+                    self.send_claim(offer_addr, &offer_challenge).await?;
+                    self.get_success(offer_addr).await?;
+                }
                 let msg: [u8; 1] = [CmdAddr::ReplyFromAddr(offer_addr).into()];
                 self.serial.send_frame(&msg).await?;
                 Result::<(), TargetError<<Cfg::Serial as FrameSerial>::SerError>>::Ok(())
