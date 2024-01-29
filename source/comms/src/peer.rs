@@ -47,8 +47,9 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
     }
 
     pub(crate) fn promote_to_active(&mut self) {
-        if self.state != State::Pending {
-            panic!();
+        match self.state {
+            State::Pending | State::Known(_) => (),
+            _ => panic!(),
         }
         // mac is already set
         self.to_peer.clear();

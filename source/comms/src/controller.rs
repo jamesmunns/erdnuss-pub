@@ -353,7 +353,7 @@ async fn update_known<T: FrameSerial>(
             continue;
         };
 
-        if instant + KNOWN_TIMEOUT >= Instant::now() {
+        if instant + KNOWN_TIMEOUT <= Instant::now() {
             p.reset_to_free();
             continue;
         }
