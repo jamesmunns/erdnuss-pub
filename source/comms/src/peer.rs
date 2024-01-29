@@ -1,6 +1,7 @@
 //! Peer
 
 use crate::frame_pool::{FrameBox, RawFrameSlice};
+use embassy_time::Instant;
 use heapless::Deque;
 
 /// The default number of "in-flight" packets FROM Controller TO Target
@@ -13,6 +14,7 @@ enum State {
     Free,
     Pending,
     Active,
+    Known(Instant),
 }
 
 pub(crate) struct Peer<const IN: usize = INCOMING_SIZE, const OUT: usize = OUTGOING_SIZE> {
@@ -36,7 +38,7 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
         }
     }
 
-    fn reset_to_free(&mut self) {
+    pub(crate) fn reset_to_free(&mut self) {
         self.to_peer.clear();
         self.from_peer.clear();
         self.mac = 0;
@@ -45,13 +47,36 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
     }
 
     pub(crate) fn promote_to_active(&mut self) {
-        if self.state != State::Pending {
-            panic!();
+        match self.state {
+            State::Pending | State::Known(_) => (),
+            _ => panic!(),
         }
         // mac is already set
         self.to_peer.clear();
         self.from_peer.clear();
         self.state = State::Active;
+        self.counter = 0;
+    }
+
+    pub(crate) fn reset_to_known(&mut self) {
+        if self.state != State::Active {
+            panic!();
+        }
+        // mac is already set
+        self.to_peer.clear();
+        self.from_peer.clear();
+        self.state = State::Known(Instant::now());
+        self.counter = 0;
+    }
+
+    pub(crate) fn promote_to_known_with_mac(&mut self, mac: u64) {
+        if self.state != State::Free {
+            panic!();
+        }
+        self.mac = mac;
+        self.to_peer.clear();
+        self.from_peer.clear();
+        self.state = State::Known(Instant::now());
         self.counter = 0;
     }
 
@@ -75,6 +100,9 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
             State::Free => {
                 // uh?
             }
+            State::Known(_) => {
+                // We currently ignore errors while in the known state. This may or may not be a mistake
+            }
             State::Pending => {
                 // one strike, you're out!
                 self.reset_to_free();
@@ -90,8 +118,8 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
                 // moving from Active -> Free with a timestamp.
                 self.counter += 1;
                 if self.counter > 3 {
-                    nut_warn!("Resetting active device");
-                    self.reset_to_free();
+                    nut_warn!("Resetting active device to known");
+                    self.reset_to_known();
                 }
             }
         }
@@ -109,6 +137,15 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
     #[inline]
     pub(crate) fn is_active(&self) -> bool {
         self.state == State::Active
+    }
+
+    #[inline]
+    pub(crate) fn is_known(&self) -> Option<(u64, Instant)> {
+        if let State::Known(instant) = self.state {
+            Some((self.mac, instant))
+        } else {
+            None
+        }
     }
 
     #[inline]

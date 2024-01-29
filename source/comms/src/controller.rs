@@ -5,7 +5,7 @@
 use core::{fmt::Debug, ops::DerefMut};
 
 use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
-use embassy_time::{with_timeout, Duration, TimeoutError};
+use embassy_time::{with_timeout, Duration, TimeoutError, Instant};
 use rand_core::RngCore;
 
 use crate::{
@@ -16,6 +16,9 @@ use crate::{
 
 /// Time that a Controller will wait for a Target to respond
 pub const REPLY_TIMEOUT: Duration = Duration::from_millis(1);
+
+/// Time that a peer can be in the Known state before getting reset to Free
+pub const KNOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Controller interface and data storage
 ///
@@ -122,6 +125,7 @@ impl<R: RawMutex + 'static> Controller<R> {
         let mut inner = self.peers.lock().await;
         serve_peers(inner.deref_mut(), serial).await?;
         complete_pendings(inner.deref_mut(), serial).await?;
+        update_known(inner.deref_mut(), serial).await?;
         offer_addr(inner.deref_mut(), serial, rand).await?;
         Ok(())
     }
@@ -167,6 +171,20 @@ impl<R: RawMutex + 'static> Controller<R> {
             .iter()
             .filter_map(|p| p.is_active().then_some(p.mac()))
             .collect()
+    }
+
+    /// Adds a list of macs to the peers as known peers
+    pub async fn add_known_macs(&self, mut macs: heapless::Vec<u64, { MAX_TARGETS }>) {
+        self.peers
+            .lock()
+            .await
+            .iter_mut()
+            .for_each(|p| {
+                if !macs.is_empty() && p.is_idle() {
+                    let mac = macs.pop().expect("No mac to pop");
+                    p.promote_to_known_with_mac(mac);
+                }
+            })
     }
 }
 
@@ -324,6 +342,59 @@ async fn complete_pendings<T: FrameSerial>(
     Ok(())
 }
 
+/// A helper function for moving targets from the Known stage to either the Active stage or to the Free stage
+async fn update_known<T: FrameSerial>(
+    inner: &mut [Peer; MAX_TARGETS],
+    serial: &mut T,
+) -> Result<(), Error<T::SerError>> {
+    for (i, p) in inner.iter_mut().enumerate() {
+        // Only worry about pending nodes
+        let Some((mac, instant)) = p.is_known() else {
+            continue;
+        };
+
+        if instant + KNOWN_TIMEOUT <= Instant::now() {
+            p.reset_to_free();
+            continue;
+        }
+
+        // Send a message with the expected MAC address for confirmation
+        let mut out_buf = [0u8; 9];
+        out_buf[0] = CmdAddr::DiscoverySuccess(i as u8).into();
+        out_buf[1..9].copy_from_slice(&mac.to_le_bytes());
+
+        // We should only get back an empty ACK and nothing else
+        let mut in_buf = [0u8; 2];
+        serial.send_frame(&out_buf).await?;
+        let rxto = with_timeout(REPLY_TIMEOUT, serial.recv(&mut in_buf));
+
+        match rxto.await {
+            Ok(Ok(tf)) => {
+                let frame = tf.frame;
+                let good_len = frame.len() == 1;
+                let good_hdr = good_len && frame[0] == CmdAddr::ReplyFromAddr(i as u8).into();
+                if good_hdr {
+                    nut_info!("Promoting to active {=usize} {=u64}", i, mac);
+                    p.promote_to_active();
+                } else {
+                    p.increment_error();
+                }
+            }
+            Ok(Err(_e)) => {
+                // We got some kind of receive error, just mark this as
+                // an error and move on
+                p.increment_error();
+                continue;
+            }
+            Err(TimeoutError) => {
+                // No answer? No address.
+                p.increment_error();
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A helper function for moving new nodes into the Pending stage
 async fn offer_addr<T: FrameSerial, R: RngCore>(
     inner: &mut [Peer; MAX_TARGETS],
@@ -357,6 +428,8 @@ async fn offer_addr<T: FrameSerial, R: RngCore>(
                     .zip(rand_iter.zip(resp_iter))
                     .for_each(|(d, (a, b))| *d = *a ^ *b);
 
+
+                // If the mac is known in the list already it will time out soonish anyway
                 p.promote_to_pending(u64::from_le_bytes(mac));
             }
         }
