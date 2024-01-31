@@ -162,6 +162,7 @@ pub mod target;
 #[cfg(feature = "postcard-rpc-helpers")]
 pub mod wirehelp;
 use embassy_time::Instant;
+pub use crate::peer::Event as PeerEvent;
 
 /// The maximum number of Targets supported by a Controller.
 pub const MAX_TARGETS: usize = 31;

@@ -15,6 +15,17 @@ enum State {
     Active,
 }
 
+/// Enum of possible "events" (state changes) a peer can have
+#[derive(Debug, Clone, Copy)]
+pub enum Event {
+    /// The peer is pending, we're currently discussing a connection
+    Pending(u64),
+    /// The peer is active and has an address
+    Active(u64),
+    /// The peer is disconnected
+    Disconnect(u64),
+}
+
 pub(crate) struct Peer<const IN: usize = INCOMING_SIZE, const OUT: usize = OUTGOING_SIZE> {
     state: State,
     counter: u8,
@@ -22,6 +33,7 @@ pub(crate) struct Peer<const IN: usize = INCOMING_SIZE, const OUT: usize = OUTGO
     mac: u64,
     to_peer: Deque<FrameBox, IN>,
     from_peer: Deque<FrameBox, OUT>,
+    last_event: Option<Event>,
 }
 
 impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
@@ -33,12 +45,14 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
             mac: 0,
             to_peer: Deque::new(),
             from_peer: Deque::new(),
+            last_event: None,
         }
     }
 
     fn reset_to_free(&mut self) {
         self.to_peer.clear();
         self.from_peer.clear();
+        self.last_event = Some(Event::Disconnect(self.mac));
         self.mac = 0;
         self.state = State::Free;
         self.counter = 0;
@@ -53,6 +67,7 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
         self.from_peer.clear();
         self.state = State::Active;
         self.counter = 0;
+        self.last_event = Some(Event::Active(self.mac));
     }
 
     pub(crate) fn promote_to_pending(&mut self, mac: u64) {
@@ -64,6 +79,7 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
         self.from_peer.clear();
         self.state = State::Pending;
         self.counter = 0;
+        self.last_event = Some(Event::Pending(mac));
     }
 
     pub(crate) fn set_success(&mut self) {
@@ -161,4 +177,10 @@ impl<const IN: usize, const OUT: usize> Peer<IN, OUT> {
     pub(crate) fn set_pool(&mut self, pool: RawFrameSlice) {
         self.incoming_pool = pool;
     }
+
+    pub(crate) fn get_last_event(&mut self) -> Option<Event> {
+        let update = self.last_event;
+        self.last_event = None;
+        update
+    } 
 }
