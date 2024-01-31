@@ -3,16 +3,14 @@
 //! This interface is used when operating as a Target.
 
 use embassy_sync::{
-    blocking_mutex::raw::RawMutex,
-    channel::{Receiver, Sender},
+    blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex}, channel::{Receiver, Sender}, signal::Signal
 };
 use embassy_time::{with_timeout, Duration, Timer};
 use futures::FutureExt;
 use rand_core::RngCore;
 
 use crate::{
-    frame_pool::{FrameBox, RawFrameSlice},
-    CmdAddr, FrameSerial,
+    frame_pool::{FrameBox, RawFrameSlice}, CmdAddr, FrameSerial
 };
 
 /// The default number of "in-flight" packets FROM Target TO Controller
@@ -56,6 +54,15 @@ impl<S> From<crate::Error<S>> for TargetError<S> {
     }
 }
 
+/// Enum of possible states a target can have
+#[derive(Debug, Clone, Copy)]
+pub enum State {
+    /// The target is connected (with the current address)
+    Connected(u8),
+    /// The target is disconnected
+    Disconnected,
+}
+
 /// Interface for the Target
 ///
 /// Note that UNLIKE the [`Controller`][crate::Controller], which uses a Mutex to share between the
@@ -74,6 +81,7 @@ where
     pool: RawFrameSlice,
     mac: [u8; 8],
     rand: Cfg::Rand,
+    state: Signal<CriticalSectionRawMutex, State>
 }
 
 impl<'a, Cfg, const IN: usize, const OUT: usize> Target<'a, Cfg, IN, OUT>
@@ -96,14 +104,17 @@ where
             mac,
             rand,
             pool,
+            state: Signal::default()
         }
     }
 
     /// Run forever, exchanging messages
     pub async fn run(&mut self) {
         'outer: loop {
+            self.state.signal(State::Disconnected);
             let addr = self.get_addr().await;
             nut_info!("Got addr: {=u8}", addr);
+            self.state.signal(State::Connected(addr));
 
             loop {
                 match with_timeout(Cfg::SELECT_TIMEOUT, self.exchange_one(addr)).await {
@@ -300,4 +311,16 @@ where
             return (addr, challenge);
         }
     }
+
+    /// wait for a change in the targets state
+    pub async fn state_change(&self) -> State {
+        self.state.wait().await
+    }
+
+
+    // TODO: Not possible until dependency embassy-sync is updated
+    // /// Get the targets current state (or None if for whatever reason no state is set)
+    // pub fn get_state(&self) -> Option<State> {
+    //     self.state.try_take()
+    // }
 }

@@ -9,9 +9,7 @@ use embassy_time::{with_timeout, Duration, TimeoutError};
 use rand_core::RngCore;
 
 use crate::{
-    frame_pool::{FrameBox, RawFrameSlice, SendFrameBox, WireFrameBox},
-    peer::{Peer, INCOMING_SIZE, OUTGOING_SIZE},
-    CmdAddr, Error, FrameSerial, MAX_TARGETS,
+    frame_pool::{FrameBox, RawFrameSlice, SendFrameBox, WireFrameBox}, peer::{Peer, INCOMING_SIZE, OUTGOING_SIZE}, CmdAddr, Error, FrameSerial, PeerEvent, MAX_TARGETS
 };
 
 /// Time that a Controller will wait for a Target to respond
@@ -114,7 +112,7 @@ impl<R: RawMutex + 'static> Controller<R> {
         &self,
         serial: &mut T,
         rand: &mut Rand,
-    ) -> Result<(), Error<T::SerError>>
+    ) -> Result<heapless::Vec<PeerEvent, { MAX_TARGETS }>, Error<T::SerError>>
     where
         T: FrameSerial,
         Rand: RngCore,
@@ -123,7 +121,7 @@ impl<R: RawMutex + 'static> Controller<R> {
         serve_peers(inner.deref_mut(), serial).await?;
         complete_pendings(inner.deref_mut(), serial).await?;
         offer_addr(inner.deref_mut(), serial, rand).await?;
-        Ok(())
+        Ok(get_events(inner.deref_mut()))
     }
 }
 
@@ -367,4 +365,11 @@ async fn offer_addr<T: FrameSerial, R: RngCore>(
     }
 
     Ok(())
+}
+
+/// A helper function to get all recent peer events
+fn get_events(
+    inner: &mut [Peer; MAX_TARGETS],
+) -> heapless::Vec<PeerEvent, { MAX_TARGETS }> {
+    inner.iter_mut().filter_map(|i| i.get_last_event()).collect()
 }
