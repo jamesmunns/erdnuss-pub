@@ -10,10 +10,10 @@ license         = "MPL-2.0"
 documentation   = "https://docs.rs/erdnuss-rp2040/"
 
 [dependencies]
-embassy-futures     = "0.1.0"
+embassy-futures     = "0.1.1"
 
 [dependencies.erdnuss-comms]
-version             = "0.99"
+version             = "0.999"
 path                = "../comms"
 
 [dependencies.embassy-rp]
@@ -21,7 +21,7 @@ version             = "0.1.0"
 features            = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"]
 
 [dependencies.embassy-time]
-version             = "0.2"
+version             = "0.3"
 features            = ["defmt", "defmt-timestamp-uptime"]
 
 [dependencies.rand_chacha]
@@ -30,14 +30,10 @@ default-features    = false
 
 
 [patch.crates-io.embassy-rp]
-git = "https://github.com/jamesmunns/embassy"
-rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d"
+git = "https://github.com/embassy-rs/embassy"
+rev = "b7bc31e51a6c6be658acc9f09bed41b94ea57623"
 
 [patch.crates-io.embassy-time]
-git = "https://github.com/jamesmunns/embassy"
-rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d"
-
-[patch.crates-io.embassy-futures]
-git = "https://github.com/jamesmunns/embassy"
-rev = "06b74a30342c527b70acbb8bacf919a5efc67c3d"
+git = "https://github.com/embassy-rs/embassy"
+rev = "b7bc31e51a6c6be658acc9f09bed41b94ea57623"
 
