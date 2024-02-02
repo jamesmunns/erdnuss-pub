@@ -3,7 +3,7 @@
 use erdnuss_comms::TimedFrame;
 use embassy_rp::{
     flash::{Blocking, Flash},
-    gpio::{AnyPin, Output},
+    gpio::Output,
     peripherals::FLASH,
     uart::{Async, Instance, Uart},
 };
@@ -37,11 +37,11 @@ pub fn get_rand(unique_id: u64) -> ChaCha8Rng {
 
 pub struct Rs485Uart<T: Instance + 'static> {
     uart: Uart<'static, T, Async>,
-    pin: Output<'static, AnyPin>,
+    pin: Output<'static>,
 }
 
 impl<T: Instance + 'static> Rs485Uart<T> {
-    pub fn new(uart: Uart<'static, T, Async>, mut pin: Output<'static, AnyPin>) -> Self {
+    pub fn new(uart: Uart<'static, T, Async>, mut pin: Output<'static>) -> Self {
         pin.set_low();
         Self { uart, pin }
     }
